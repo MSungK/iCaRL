@@ -8,8 +8,9 @@ import torch.optim as optim
 from myNetwork import network
 from iCIFAR100 import iCIFAR100
 from torch.utils.data import DataLoader
+from logging import info
 
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 def get_one_hot(target,num_class):
     one_hot=torch.zeros(target.shape[0],num_class).to(device)
@@ -42,12 +43,12 @@ class iCaRLmodel:
         self.test_transform = transforms.Compose([#transforms.Resize(img_size),
                                                    transforms.ToTensor(),
                                                  transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))])
-        
+
         self.classify_transform=transforms.Compose([transforms.RandomHorizontalFlip(p=1.),
                                                     #transforms.Resize(img_size),
                                                     transforms.ToTensor(),
                                                    transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))])
-        
+
         self.train_dataset = iCIFAR100('dataset', transform=self.train_transform, download=True)
         self.test_dataset = iCIFAR100('dataset', test_transform=self.test_transform, train=False, download=True)
 
@@ -63,7 +64,10 @@ class iCaRLmodel:
     def beforeTrain(self):
         self.model.eval()
         classes=[self.numclass-self.task_size,self.numclass]
+        info(f'Class Boundary: {classes}')
+        
         self.train_loader,self.test_loader=self._get_train_and_test_dataloader(classes)
+        
         if self.numclass>self.task_size:
             self.model.Incremental_learning(self.numclass)
         self.model.train()
@@ -72,13 +76,23 @@ class iCaRLmodel:
     def _get_train_and_test_dataloader(self, classes):
         self.train_dataset.getTrainData(classes, self.exemplar_set)
         self.test_dataset.getTestData(classes)
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2**32
+        g = torch.Generator()
+        g.manual_seed(0)
         train_loader = DataLoader(dataset=self.train_dataset,
                                   shuffle=True,
-                                  batch_size=self.batchsize)
+                                  batch_size=self.batchsize,
+                                  num_workers=4,
+                                  worker_init_fn=seed_worker,
+                                  generator=g)
 
         test_loader = DataLoader(dataset=self.test_dataset,
                                  shuffle=True,
-                                 batch_size=self.batchsize)
+                                 batch_size=self.batchsize,
+                                 num_workers=4,
+                                 worker_init_fn=seed_worker,
+                                 generator=g)
 
         return train_loader, test_loader
     
@@ -170,7 +184,7 @@ class iCaRLmodel:
 
 
     # change the size of examplar
-    def afterTrain(self,accuracy):
+    def afterTrain(self, accuracy):
         self.model.eval()
         m=int(self.memory_size/self.numclass)
         self._reduce_exemplar_sets(m)
@@ -183,13 +197,15 @@ class iCaRLmodel:
         self.model.train()
         KNN_accuracy=self._test(self.test_loader,0)
         print("NMS accuracy："+str(KNN_accuracy.item()))
-        filename='model/accuracy:%.3f_KNN_accuracy:%.3f_increment:%d_net.pkl' % (accuracy, KNN_accuracy, i + 10)
+        
+        from os import makedirs
+        makedirs('model', exist_ok=True)
+        filename='model/accuracy:%.3f_KNN_accuracy:%.3f_increment:%d_net.pkl' % (accuracy, KNN_accuracy, i)
         torch.save(self.model,filename)
         self.old_model=torch.load(filename)
         self.old_model.to(device)
         self.old_model.eval()
         
-
 
     def _construct_exemplar_set(self, images, m):
         class_mean, feature_extractor_output = self.compute_class_mean(images, self.transform)
@@ -213,7 +229,6 @@ class iCaRLmodel:
         for index in range(len(self.exemplar_set)):
             self.exemplar_set[index] = self.exemplar_set[index][:m]
             print('Size of class %d examplar: %s' % (index, str(len(self.exemplar_set[index]))))
-
 
 
     def Image_transform(self, images, transform):
